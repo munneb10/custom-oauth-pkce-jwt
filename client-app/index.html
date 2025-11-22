@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OAuth 2.0 PKCE + JWT Demo Client</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 800px;
+        margin: 2rem auto;
+      }
+      pre {
+        background: #111;
+        color: #0f0;
+        padding: 1rem;
+        overflow: auto;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        margin: 0.25rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>OAuth 2.0 + PKCE + JWT – Demo Client</h1>
+
+    <p>
+      This is a minimal SPA acting as a public client using PKCE with your custom
+      authorization server.
+    </p>
+
+    <button id="login-btn">Login with Demo Auth</button>
+    <button id="call-api-btn" disabled>Call Protected API (/profile)</button>
+    <button id="refresh-btn" disabled>Refresh Access Token</button>
+
+    <h2>Tokens</h2>
+    <pre id="tokens-box">No tokens yet.</pre>
+
+    <h2>API Response</h2>
+    <pre id="api-box">No API calls yet.</pre>
+
+    <script>
+      const AUTH_SERVER = "http://localhost:4000";
+      const RESOURCE_SERVER = "http://localhost:5000";
+      const CLIENT_ID = "demo-client";
+      const REDIRECT_URI = "http://localhost:3000/";
+
+      const loginBtn = document.getElementById("login-btn");
+      const callApiBtn = document.getElementById("call-api-btn");
+      const refreshBtn = document.getElementById("refresh-btn");
+      const tokensBox = document.getElementById("tokens-box");
+      const apiBox = document.getElementById("api-box");
+
+      let accessToken = null;
+      let refreshToken = null;
+
+      loginBtn.addEventListener("click", startLogin);
+      callApiBtn.addEventListener("click", callProtectedApi);
+      refreshBtn.addEventListener("click", refreshAccessToken);
+
+      // When the page loads, check if we arrived with ?code=...
+      window.addEventListener("load", handleRedirectCallback);
+
+      // ---- PKCE Helpers ----
+      async function startLogin() {
+        const codeVerifier = generateRandomString(64);
+        sessionStorage.setItem("code_verifier", codeVerifier);
+
+        const codeChallenge = await pkceChallengeFromVerifier(codeVerifier);
+        const state = generateRandomString(16);
+
+        const url = new URL(AUTH_SERVER + "/authorize");
+        url.searchParams.set("response_type", "code");
+        url.searchParams.set("client_id", CLIENT_ID);
+        url.searchParams.set("redirect_uri", REDIRECT_URI);
+        url.searchParams.set("code_challenge", codeChallenge);
+        url.searchParams.set("code_challenge_method", "S256");
+        url.searchParams.set("state", state);
+
+        window.location = url.toString();
+      }
+
+      async function handleRedirectCallback() {
+        const url = new URL(window.location.href);
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+
+        if (!code) {
+          return;
+        }
+
+        // Clear query params from URL
+        window.history.replaceState({}, document.title, REDIRECT_URI);
+
+        const codeVerifier = sessionStorage.getItem("code_verifier");
+        if (!codeVerifier) {
+          alert("Missing code_verifier in sessionStorage");
+          return;
+        }
+
+        try {
+          const body = new URLSearchParams();
+          body.set("grant_type", "authorization_code");
+          body.set("code", code);
+          body.set("redirect_uri", REDIRECT_URI);
+          body.set("client_id", CLIENT_ID);
+          body.set("code_verifier", codeVerifier);
+
+          const res = await fetch(AUTH_SERVER + "/token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            tokensBox.textContent = "Error exchanging code:\n" + JSON.stringify(data, null, 2);
+            return;
+          }
+
+          accessToken = data.access_token;
+          refreshToken = data.refresh_token;
+
+          tokensBox.textContent = JSON.stringify(data, null, 2);
+          callApiBtn.disabled = false;
+          refreshBtn.disabled = false;
+        } catch (err) {
+          tokensBox.textContent = "Error exchanging code: " + err;
+        }
+      }
+
+      async function callProtectedApi() {
+        if (!accessToken) {
+          alert("No access token");
+          return;
+        }
+
+        try {
+          const res = await fetch(RESOURCE_SERVER + "/profile", {
+            headers: {
+              Authorization: "Bearer " + accessToken
+            }
+          });
+
+          const data = await res.json();
+          apiBox.textContent = JSON.stringify(data, null, 2);
+        } catch (err) {
+          apiBox.textContent = "Error calling API: " + err;
+        }
+      }
+
+      async function refreshAccessToken() {
+        if (!refreshToken) {
+          alert("No refresh token");
+          return;
+        }
+
+        try {
+          const body = new URLSearchParams();
+          body.set("grant_type", "refresh_token");
+          body.set("refresh_token", refreshToken);
+          body.set("client_id", CLIENT_ID);
+
+          const res = await fetch(AUTH_SERVER + "/token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body
+          });
+
+          const data = await res.json();
+          if (!res.ok) {
+            tokensBox.textContent =
+              "Error refreshing token:\n" + JSON.stringify(data, null, 2);
+            return;
+          }
+
+          accessToken = data.access_token;
+          refreshToken = data.refresh_token;
+
+          tokensBox.textContent =
+            "Token refreshed:\n" + JSON.stringify(data, null, 2);
+        } catch (err) {
+          tokensBox.textContent = "Error refreshing token: " + err;
+        }
+      }
+
+      // ---- PKCE core functions ----
+      function generateRandomString(length) {
+        const charset =
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+        let result = "";
+        const randomValues = new Uint8Array(length);
+        window.crypto.getRandomValues(randomValues);
+        for (let i = 0; i < randomValues.length; i++) {
+          result += charset[randomValues[i] % charset.length];
+        }
+        return result;
+      }
+
+      async function pkceChallengeFromVerifier(verifier) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(verifier);
+        const digest = await window.crypto.subtle.digest("SHA-256", data);
+        return base64UrlEncode(new Uint8Array(digest));
+      }
+
+      function base64UrlEncode(arrayBuffer) {
+        let str = "";
+        const bytes = new Uint8Array(arrayBuffer);
+        for (let i = 0; i < bytes.byteLength; i++) {
+          str += String.fromCharCode(bytes[i]);
+        }
+        return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      }
+    </script>
+  </body>
+</html>
